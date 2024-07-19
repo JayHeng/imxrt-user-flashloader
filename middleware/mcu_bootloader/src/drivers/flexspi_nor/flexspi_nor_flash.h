@@ -76,6 +76,8 @@ enum
     kSerialNorCfgOption_DeviceType_MicronOctalSDR = 7,
     kSerialNorCfgOption_DeviceType_AdestoOctalDDR = 8,
     kSerialNorCfgOption_DeviceType_AdestoOctalSDR = 9,
+    kSerialNorCfgOption_DeviceType_InfineonOctalDDR = 10,
+    kSerialNorCfgOption_DeviceType_InfineonOctalSDR = 11,
 };
 
 enum

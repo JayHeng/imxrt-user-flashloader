@@ -419,6 +419,11 @@ static status_t flexspi_nor_generate_config_block_micron_octalflash(uint32_t ins
 static status_t flexspi_nor_generate_config_block_adesto_octalflash(uint32_t instance,
                                                                     flexspi_nor_config_t *config,
                                                                     serial_nor_config_option_t *option);
+
+//!@brief Generate FlexSPI Configuration Block for Infineon Octal Flash
+static status_t flexspi_nor_generate_config_block_infineon_octalflash(uint32_t instance,
+                                                                      flexspi_nor_config_t *config,
+                                                                      serial_nor_config_option_t *option);
 #endif // FLEXSPI_ENABLE_OCTAL_FLASH_SUPPORT
 
 #if FLEXSPI_ENABLE_NO_CMD_MODE_SUPPORT
@@ -3304,6 +3309,342 @@ status_t flexspi_nor_generate_config_block_adesto_octalflash(uint32_t instance,
     return status;
 }
 
+status_t flexspi_nor_generate_config_block_infineon_octalflash(uint32_t instance,
+                                                               flexspi_nor_config_t *config,
+                                                               serial_nor_config_option_t *option)
+{
+    status_t status = kStatus_FLEXSPINOR_Flash_NotFound;
+    flexspi_xfer_t xfer;
+    uint32_t mfg_id[2];
+
+    bool is_sdr_mode = option->option0.B.device_type == kSerialNorCfgOption_DeviceType_MacronixOctalSDR;
+
+    // SFDP table is not programmed in OctaFlash yet, so use RDID command instead
+    const lut_seq_t k_rdid_lut[3] = {
+        // Read Identification LUT sequence for 1 pad instruction
+        { FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, kSerialFlash_ReadManufacturerId, READ_SDR, FLEXSPI_1PAD, 3), 0, 0, 0 },
+
+        // Read Identification LUT sequence for OPI SDR instruction
+        { FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_8PAD, kSerialFlash_ReadManufacturerId, CMD_SDR, FLEXSPI_8PAD, 0x60),
+          FLEXSPI_LUT_SEQ(RADDR_SDR, FLEXSPI_8PAD, 0x20, READ_SDR, FLEXSPI_8PAD, 0x4), 0, 0 },
+
+        // Read Identification LUT sequence for OPI DDR instruction
+        { FLEXSPI_LUT_SEQ(CMD_DDR, FLEXSPI_8PAD, kSerialFlash_ReadManufacturerId, CMD_DDR, FLEXSPI_8PAD, 0x60),
+          FLEXSPI_LUT_SEQ(RADDR_DDR, FLEXSPI_8PAD, 0x20, READ_DDR, FLEXSPI_8PAD, 0x4), 0, 0 },
+    };
+
+    do
+    {
+        uint32_t cmd_pads = option->option0.B.cmd_pads;
+        uint32_t query_pads = option->option0.B.query_pads;
+
+        // Do parameter check
+        if ((cmd_pads != FLEXSPI_1PAD) && (cmd_pads != FLEXSPI_8PAD))
+        {
+            status = kStatus_InvalidArgument;
+            break;
+        }
+
+        if ((query_pads != FLEXSPI_1PAD) && (query_pads != FLEXSPI_8PAD))
+        {
+            status = kStatus_InvalidArgument;
+            break;
+        }
+
+        if ((query_pads == FLEXSPI_8PAD) && (cmd_pads == FLEXSPI_1PAD))
+        {
+            status = kStatus_InvalidArgument;
+            break;
+        }
+
+        if (query_pads == FLEXSPI_1PAD)
+        {
+            flash_run_context_t run_ctx;
+            status = flexspi_nor_read_persistent(&run_ctx.U);
+            flexspi_nor_write_persistent(0);
+            if (status == kStatus_Success)
+            {
+                status = flexspi_nor_restore_spi_protocol(instance, config, &run_ctx);
+                if (status != kStatus_Success)
+                {
+                    break;
+                }
+            }
+
+            config->memConfig.readSampleClkSrc = kFlexSPIReadSampleClk_LoopbackInternally;
+            config->memConfig.controllerMiscOption |= FLEXSPI_BITMASK(kFlexSpiMiscOffset_SafeConfigFreqEnable);
+            xfer.rxSize = 3;
+        }
+        else if (query_pads == FLEXSPI_8PAD)
+        {
+            config->memConfig.readSampleClkSrc = kFlexSPIReadSampleClk_ExternalInputFromDqsPad;
+            config->memConfig.controllerMiscOption |= FLEXSPI_BITMASK(kFlexSpiMiscOffset_SafeConfigFreqEnable);
+
+            if (option->option0.B.device_type == kSerialNorCfgOption_DeviceType_MacronixOctalDDR)
+            {
+                config->memConfig.controllerMiscOption |= FLEXSPI_BITMASK(kFlexSpiMiscOffset_DdrModeEnable);
+            }
+            xfer.rxSize = 6;
+        }
+
+        if ((cmd_pads == FLEXSPI_1PAD) && (query_pads == FLEXSPI_1PAD))
+        {
+            is_sdr_mode = true;
+        }
+
+        if (cmd_pads == FLEXSPI_8PAD)
+        {
+            config->memConfig.sflashPadType = kSerialFlash_8Pads;
+        }
+        else
+        {
+            config->memConfig.sflashPadType = kSerialFlash_1Pad;
+        }
+
+        status = flexspi_nor_flash_init(instance, config);
+        if (status != kStatus_Success)
+        {
+            break;
+        }
+
+        uint32_t index = 0;
+        if (query_pads == FLEXSPI_1PAD)
+        {
+            index = 0;
+        }
+        else if (is_sdr_mode)
+        {
+            index = 1;
+        }
+        else
+        {
+            index = 2;
+        }
+        flexspi_update_lut(instance, NOR_CMD_LUT_FOR_IP_CMD, (const uint32_t *)&k_rdid_lut[index], 1);
+
+        xfer.baseAddress = 0;
+        xfer.isParallelModeEnable = false;
+        xfer.operation = kFlexSpiOperation_Read;
+        xfer.seqId = NOR_CMD_LUT_FOR_IP_CMD;
+        xfer.seqNum = 1;
+        xfer.rxBuffer = &mfg_id[0];
+        status = flexspi_command_xfer(instance, &xfer);
+        if (status != kStatus_Success)
+        {
+            break;
+        }
+
+        uint8_t *mfg_id_buffer = (uint8_t *)&mfg_id;
+        if (mfg_id_buffer[0] != 0xC2)
+        {
+            break;
+        }
+
+        // Get Flash Size
+        uint32_t flashSize = 0;
+        if (query_pads == FLEXSPI_1PAD)
+        {
+            flashSize = ((64UL * 1024UL) << (mfg_id_buffer[2] - 0x30));
+        }
+        else
+        {
+            flashSize = ((64UL * 1024UL) << (mfg_id_buffer[5] - 0x30));
+        }
+
+        if (config->memConfig.sflashA1Size)
+        {
+            config->memConfig.sflashA1Size = flashSize;
+        }
+        if (config->memConfig.sflashB1Size)
+        {
+            config->memConfig.sflashB1Size = flashSize;
+        }
+
+        config->sectorSize = 4UL * 1024; // 4KB sector size
+        config->pageSize = 256U;
+        config->blockSize = 64UL * 1024; // 64KB block size
+
+        config->memConfig.readSampleClkSrc = kFlexSPIReadSampleClk_ExternalInputFromDqsPad;
+        config->memConfig.controllerMiscOption |= FLEXSPI_BITMASK(kFlexSpiMiscOffset_SafeConfigFreqEnable);
+
+        bool enableDTR = !is_sdr_mode;
+
+        // Enable OPI mode
+        if (query_pads == FLEXSPI_1PAD)
+        {
+            if (cmd_pads == FLEXSPI_8PAD)
+            {
+                config->memConfig.deviceModeCfgEnable = true;
+                config->memConfig.deviceModeType = kDeviceConfigCmdType_Spi2Xpi;
+                config->memConfig.waitTimeCfgCommands = 1; // Wait 100us
+                config->memConfig.deviceModeSeq.seqId = 6;
+                config->memConfig.deviceModeSeq.seqNum = 1;
+
+                flash_run_context_t run_ctx;
+                run_ctx.B.por_mode = kFlashInstMode_ExtendedSpi;
+                run_ctx.B.restore_sequence = kRestoreSequence_Send_6699_9966;
+
+                if (enableDTR)
+                {
+                    run_ctx.B.current_mode = kFlashInstMode_OPI_DDR;
+                    config->memConfig.deviceModeArg = 2;
+                    config->memConfig.lookupTable[4 * 6 + 0] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x72, CMD_SDR, FLEXSPI_1PAD, 0x00);
+                    config->memConfig.lookupTable[4 * 6 + 1] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x00, CMD_SDR, FLEXSPI_1PAD, 0x00);
+                    config->memConfig.lookupTable[4 * 6 + 2] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x00, WRITE_SDR, FLEXSPI_1PAD, 0x01);
+
+                    // A flag that marks the configuration block to be saved to FLASH need to be 16bit swapped.
+                    // Namely D0 D1 D2 D3 -> D1 D0 D3 D2
+                    if (option->option0.B.misc_mode == kSerialNorEnhanceMode_DataOrderSwapped)
+                    {
+                        config->isDataOrderSwapped = true;
+                    }
+                    else
+                    {
+                        config->isDataOrderSwapped = false;
+                    }
+                }
+                else
+                {
+                    run_ctx.B.current_mode = kFlashInstMode_OPI_SDR;
+                    // Enable DQS under SDR mode
+                    config->memConfig.deviceModeArg = 0x02;
+                    config->memConfig.lookupTable[4 * 6 + 0] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x72, CMD_SDR, FLEXSPI_1PAD, 0x00);
+                    config->memConfig.lookupTable[4 * 6 + 1] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x00, CMD_SDR, FLEXSPI_1PAD, 0x02);
+                    config->memConfig.lookupTable[4 * 6 + 2] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x00, WRITE_SDR, FLEXSPI_1PAD, 0x01);
+
+                    // Enable OPI SDR mode
+                    config->memConfig.configCmdEnable = 1;
+                    config->memConfig.configCmdSeqs[0].seqId = 7;
+                    config->memConfig.configCmdSeqs[0].seqNum = 1;
+                    config->memConfig.configCmdArgs[0] = 0x01;
+                    config->memConfig.lookupTable[4 * 7 + 0] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x72, CMD_SDR, FLEXSPI_1PAD, 0x00);
+                    config->memConfig.lookupTable[4 * 7 + 1] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x00, CMD_SDR, FLEXSPI_1PAD, 0x00);
+                    config->memConfig.lookupTable[4 * 7 + 2] =
+                        FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x00, WRITE_SDR, FLEXSPI_1PAD, 0x01);
+                }
+
+                flexspi_nor_write_persistent(run_ctx.U);
+            }
+        }
+
+        // Write Enable
+        config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_WRITEENABLE] =
+            FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x06, STOP, FLEXSPI_1PAD, 0x00);
+
+        // Read Status
+        config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READSTATUS + 0] =
+            FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x05, READ_SDR, FLEXSPI_1PAD, 0x04);
+
+        if (cmd_pads == FLEXSPI_1PAD)
+        {
+            // No external DQS for single SDR mode, so use loopback from DQS pad instead
+            config->memConfig.readSampleClkSrc = kFlexSPIReadSampleClk_LoopbackFromDqsPad;
+            // Read
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READ + 0] =
+                FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x0C, RADDR_SDR, FLEXSPI_1PAD, 0x20);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READ + 1] =
+                FLEXSPI_LUT_SEQ(DUMMY_SDR, FLEXSPI_1PAD, 0x08, READ_SDR, FLEXSPI_1PAD, 0x04);
+
+            // Program
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_PAGEPROGRAM + 0] =
+                FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x12, RADDR_SDR, FLEXSPI_1PAD, 0x20);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_PAGEPROGRAM + 1] =
+                FLEXSPI_LUT_SEQ(WRITE_SDR, FLEXSPI_1PAD, 0x04, STOP, FLEXSPI_1PAD, 0x00);
+
+            // Erase Sector
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_ERASESECTOR + 0] =
+                FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x21, RADDR_SDR, FLEXSPI_1PAD, 0x20);
+
+            // Erase Block
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_ERASEBLOCK + 0] =
+                FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0xDC, RADDR_SDR, FLEXSPI_1PAD, 0x20);
+
+            // Erase Chip
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_CHIPERASE] =
+                FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0x60, STOP, FLEXSPI_1PAD, 0x00);
+        }
+        else
+        {
+            uint32_t cmd_inst = enableDTR ? CMD_DDR : CMD_SDR;
+            uint32_t addr_inst = enableDTR ? RADDR_DDR : RADDR_SDR;
+            uint32_t dummy_inst = enableDTR ? DUMMY_DDR : DUMMY_SDR;
+            uint32_t read_inst = enableDTR ? READ_DDR : READ_SDR;
+            uint32_t write_inst = enableDTR ? WRITE_DDR : WRITE_SDR;
+
+            // Read
+            uint32_t dummy_cycles = 5;
+            if (enableDTR)
+            {
+                dummy_cycles *= 2;
+                config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READ + 0] =
+                    FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0xEE, cmd_inst, FLEXSPI_8PAD, 0x11);
+            }
+            else
+            {
+                config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READ + 0] =
+                    FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0xEC, cmd_inst, FLEXSPI_8PAD, 0x13);
+            }
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READ + 1] =
+                FLEXSPI_LUT_SEQ(addr_inst, FLEXSPI_8PAD, 0x20, dummy_inst, FLEXSPI_8PAD, dummy_cycles);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READ + 2] =
+                FLEXSPI_LUT_SEQ(read_inst, FLEXSPI_8PAD, 0x04, STOP, FLEXSPI_1PAD, 0x00);
+
+            // Write Enable OPI
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_WRITEENABLE_XPI] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x06, cmd_inst, FLEXSPI_8PAD, 0xF9);
+
+            // Read Status OPI
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READSTATUS_XPI + 0] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x05, cmd_inst, FLEXSPI_8PAD, 0xFA);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READSTATUS_XPI + 1] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x00, cmd_inst, FLEXSPI_8PAD, 0x00);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READSTATUS_XPI + 2] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x00, cmd_inst, FLEXSPI_8PAD, 0x00);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_READSTATUS_XPI + 3] =
+                FLEXSPI_LUT_SEQ(read_inst, FLEXSPI_8PAD, 0x04, STOP, FLEXSPI_1PAD, 0x0);
+
+            // Program
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_PAGEPROGRAM + 0] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x12, cmd_inst, FLEXSPI_8PAD, 0xED);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_PAGEPROGRAM + 1] =
+                FLEXSPI_LUT_SEQ(addr_inst, FLEXSPI_8PAD, 0x20, write_inst, FLEXSPI_8PAD, 0x04);
+
+            // Erase Sector
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_ERASESECTOR + 0] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x21, cmd_inst, FLEXSPI_8PAD, 0xDE);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_ERASESECTOR + 1] =
+                FLEXSPI_LUT_SEQ(addr_inst, FLEXSPI_8PAD, 0x20, STOP, FLEXSPI_1PAD, 0x00);
+
+            // Erase Block
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_ERASEBLOCK + 0] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0xDC, cmd_inst, FLEXSPI_8PAD, 0x23);
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_ERASEBLOCK + 1] =
+                FLEXSPI_LUT_SEQ(addr_inst, FLEXSPI_8PAD, 0x20, STOP, FLEXSPI_1PAD, 0x00);
+
+            // Erase Chip
+            config->memConfig.lookupTable[4 * NOR_CMD_LUT_SEQ_IDX_CHIPERASE] =
+                FLEXSPI_LUT_SEQ(cmd_inst, FLEXSPI_8PAD, 0x60, cmd_inst, FLEXSPI_8PAD, 0x9F);
+
+            if (enableDTR)
+            {
+                config->memConfig.controllerMiscOption |= FLEXSPI_BITMASK(kFlexSpiMiscOffset_DdrModeEnable);
+            }
+            config->serialNorType = kSerialNorType_XPI;
+        }
+
+    } while (0);
+
+    return status;
+}
+
 #if (!BL_FEATURE_HAS_FLEXSPI_NOR_ROMAPI) || (!ROM_API_HAS_FLEXSPI_NOR_GET_CFG)
 // See flexspi_nor_flash.h for more details.
 status_t flexspi_nor_get_config(uint32_t instance, flexspi_nor_config_t *config, serial_nor_config_option_t *option)
@@ -3390,6 +3731,10 @@ status_t flexspi_nor_get_config(uint32_t instance, flexspi_nor_config_t *config,
             case kSerialNorCfgOption_DeviceType_AdestoOctalDDR:
             case kSerialNorCfgOption_DeviceType_AdestoOctalSDR:
                 status = flexspi_nor_generate_config_block_adesto_octalflash(instance, config, option);
+                break;
+            case kSerialNorCfgOption_DeviceType_InfineonOctalDDR:
+            case kSerialNorCfgOption_DeviceType_InfineonOctalSDR:
+                status = flexspi_nor_generate_config_block_infineon_octalflash(instance, config, option);
                 break;
 #endif // FLEXSPI_ENABLE_OCTAL_FLASH_SUPPORT
             default:
