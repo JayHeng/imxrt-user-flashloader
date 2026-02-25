@@ -135,6 +135,13 @@ enum _secure_commands
     kCommandsAllowedWhenSecure = (HAS_CMD(kCommandTag_FlashSecurityDisable) | HAS_CMD(kCommandTag_GetProperty) |
                                   HAS_CMD(kCommandTag_Reset) | HAS_CMD(kCommandTag_SetProperty) |
                                   HAS_CMD(kCommandTag_FlashEraseAllUnsecure) | HAS_CMD(kCommandTag_ReceiveSbFile)
+                                   | HAS_CMD(kCommandTag_FlashReadOnce)
+                                   | HAS_CMD(kCommandTag_FlashProgramOnce)
+                                   | HAS_CMD(kCommandTag_FillMemory)
+                                   | HAS_CMD(kCommandTag_ConfigureMemory)
+                                   | HAS_CMD(kCommandTag_FlashEraseRegion)
+                                   | HAS_CMD(kCommandTag_WriteMemory)
+                                   | HAS_CMD(kCommandTag_ReadMemory)
 #if BL_FEATURE_KEY_PROVISIONING
                                   | HAS_CMD(kCommandTag_KeyProvisioning)
 #endif // BL_FEATURE_KEY_PROVISIONING

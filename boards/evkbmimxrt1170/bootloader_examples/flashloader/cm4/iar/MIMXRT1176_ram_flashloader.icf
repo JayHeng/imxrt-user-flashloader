@@ -13,14 +13,14 @@
 ** ###################################################################
 */
 
-define symbol m_interrupts_start       = 0x20250000;
-define symbol m_interrupts_end         = 0x202503FF;
+define symbol m_interrupts_start       = 0x00005000;
+define symbol m_interrupts_end         = 0x000053FF;
 
-define symbol m_text_start             = 0x20250400;
-define symbol m_text_end               = 0x2026FFFF;
+define symbol m_text_start             = 0x00005400;
+define symbol m_text_end               = 0x0001FFFF;
 
-define symbol m_data_start             = 0x20270000;
-define symbol m_data_end               = 0x2027FFFF;
+define symbol m_data_start             = 0x20000000;
+define symbol m_data_end               = 0x2001FFFF;
 
 /* Sizes */
 if (isdefinedsymbol(__stack_size__)) {
